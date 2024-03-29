@@ -5,13 +5,14 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use ros::{halt_loop, vga_println};
+use ros::{halt_loop, serial_println, vga_println};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     ros::init();
 
-    vga_println!("Hello World!");
+    vga_println!("Hello VGA!");
+    serial_println!("Hello Serial!");
 
     #[cfg(test)]
     test_main();

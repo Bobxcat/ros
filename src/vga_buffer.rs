@@ -4,6 +4,9 @@ use core::{cell::OnceCell, fmt, ops::DerefMut, ptr::NonNull};
 use spin::{Lazy, Mutex};
 use volatile::Volatile;
 use x86_64::instructions::interrupts;
+use x86_64::instructions::port::Port;
+
+use crate::serial_println;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +40,12 @@ impl ColorCode {
     }
 }
 
+impl Default for ColorCode {
+    fn default() -> Self {
+        Self::new(Color::White, Color::Black)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 struct ScreenChar {
@@ -44,10 +53,30 @@ struct ScreenChar {
     color_code: ColorCode,
 }
 
+impl ScreenChar {
+    /// A space with default coloring
+    fn blank() -> Self {
+        Self {
+            ascii_character: b' ',
+            color_code: ColorCode::default(),
+        }
+    }
+    /// A null character with default coloring, used to denote the end of a line
+    ///
+    /// If you are not trying to denote the end of a line, consider using `blank`
+    fn null() -> Self {
+        Self {
+            ascii_character: b'\0',
+            color_code: ColorCode::default(),
+        }
+    }
+}
+
 const BUFFER_HEIGHT: usize = 25;
 const BUFFER_WIDTH: usize = 80;
 
 #[repr(transparent)]
+#[derive(Debug, Clone)]
 struct VgaBuffer {
     chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
@@ -61,11 +90,13 @@ pub struct VgaWriter {
 impl VgaWriter {
     pub fn lock() -> impl DerefMut<Target = Self> {
         static VGA_WRITER: Lazy<Mutex<VgaWriter>> = Lazy::new(|| {
-            Mutex::new(VgaWriter {
+            let mut w = VgaWriter {
                 column_position: 0,
-                color_code: ColorCode::new(Color::White, Color::Black),
+                color_code: ColorCode::default(),
                 buffer: unsafe { &mut *(0xb8000 as *mut VgaBuffer) },
-            })
+            };
+            w.clear();
+            Mutex::new(w)
         });
         VGA_WRITER.lock()
     }
@@ -75,6 +106,8 @@ impl VgaWriter {
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
+            // Backspace
+            0x8 => self.backspace(),
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -91,25 +124,88 @@ impl VgaWriter {
                 self.column_position += 1;
             }
         }
+        self.set_cursor_pos(BUFFER_HEIGHT - 1, self.column_position);
     }
 
     fn new_line(&mut self) {
-        for y in 1..BUFFER_HEIGHT {
-            for x in 0..BUFFER_WIDTH {
-                let c = self.buffer.chars[y][x].read();
-                self.buffer.chars[y - 1][x].write(c);
-            }
+        if self.column_position < BUFFER_WIDTH {
+            self.buffer.chars[BUFFER_HEIGHT - 1][self.column_position].write(ScreenChar::null());
         }
-        self.clear_row(BUFFER_HEIGHT - 1);
+        self.scroll(-1);
         self.column_position = 0;
     }
 
-    fn clear_row(&mut self, row: usize) {
+    /// Moves all rows by `offset`, clearing left behind space.
+    /// Keep in mind that a negative offset moves the rows up
+    ///
+    /// Does not change the cursor in any way
+    pub fn scroll(&mut self, offset: isize) {
+        let src = self.buffer.clone();
+        self.clear();
+        for y in 0..BUFFER_HEIGHT {
+            for x in 0..BUFFER_WIDTH {
+                let origin_x = x;
+                let Ok(origin_y) = usize::try_from(y as isize - offset) else {
+                    continue;
+                };
+                let Some(src_row) = src.chars.get(origin_y) else {
+                    continue;
+                };
+                self.buffer.chars[y][x].write(src_row[origin_x].read());
+            }
+        }
+    }
+
+    pub fn copy_row(&mut self, src: usize, dest: usize) {
+        if src == dest {
+            return;
+        }
+
         for x in 0..BUFFER_WIDTH {
-            self.buffer.chars[row][x].write(ScreenChar {
-                ascii_character: b' ',
-                color_code: self.color_code,
-            });
+            let c = self.buffer.chars[src][x].read();
+            self.buffer.chars[dest][x].write(c);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for y in 0..BUFFER_HEIGHT {
+            self.clear_row(y);
+        }
+    }
+
+    #[inline]
+    pub fn clear_row(&mut self, row: usize) {
+        for x in 0..BUFFER_WIDTH {
+            self.clear_char(row, x);
+        }
+        self.set_char(row, 0, ScreenChar::null());
+    }
+
+    #[inline]
+    pub fn clear_char(&mut self, row: usize, col: usize) {
+        self.set_char(row, col, ScreenChar::blank())
+    }
+
+    #[inline]
+    fn set_char(&mut self, row: usize, col: usize, c: ScreenChar) {
+        if row >= BUFFER_HEIGHT || col >= BUFFER_WIDTH {
+            return;
+        }
+        self.buffer.chars[row][col].write(c);
+    }
+
+    fn backspace(&mut self) {
+        if self.column_position == 0 {
+            self.scroll(1);
+            self.column_position = self.buffer.chars[BUFFER_HEIGHT - 1]
+                .iter()
+                .position(|c| c.read().ascii_character == b'\0')
+                // Don't set to the last position in order to keep consecutive backspaces working
+                .unwrap_or(BUFFER_WIDTH);
+        } else {
+            self.buffer.chars[BUFFER_HEIGHT - 1][self.column_position - 1]
+                .write(ScreenChar::blank());
+            self.column_position -= 1;
         }
     }
 
@@ -117,10 +213,48 @@ impl VgaWriter {
         for byte in s.bytes() {
             match byte {
                 // printable ASCII byte or newline
-                0x20..=0x7e | b'\n' => self.write_byte(byte),
+                0x20..=0x7e | b'\n' | 0x08 => self.write_byte(byte),
                 // not part of printable ASCII range
                 _ => self.write_byte(0xfe),
             }
+        }
+    }
+
+    /// `start` and `end` refer to the rows (scanlines) of the cursor
+    pub fn enable_cursor(&mut self, start: u8, end: u8) {
+        let mut port0 = Port::<u8>::new(0x3D4);
+        let mut port1 = Port::<u8>::new(0x3D5);
+
+        unsafe {
+            port0.write(0x0A);
+            let x = (port1.read() & 0xC0) | start;
+            port1.write(x);
+
+            port0.write(0x0B);
+            let x = (port1.read() & 0xE0) | end;
+            port1.write(x);
+        }
+    }
+
+    pub fn disable_cursor(&mut self) {
+        let mut port0 = Port::<u8>::new(0x3D4);
+        let mut port1 = Port::<u8>::new(0x3D5);
+        unsafe {
+            port0.write(0x0A);
+            port1.write(0x20);
+        }
+    }
+
+    pub fn set_cursor_pos(&mut self, row: usize, col: usize) {
+        // From https://wiki.osdev.org/Text_Mode_Cursor#Moving_the_Cursor_2
+        let pos = (row * BUFFER_WIDTH + col) as u16;
+        let mut port0 = Port::<u8>::new(0x3D4);
+        let mut port1 = Port::<u8>::new(0x3D5);
+        unsafe {
+            port0.write(0x0f);
+            port1.write((pos & 0xFF) as u8);
+            port0.write(0x0e);
+            port1.write(((pos >> 8) & 0xFF) as u8);
         }
     }
 }
@@ -147,8 +281,6 @@ macro_rules! vga_println {
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
-
     interrupts::without_interrupts(|| {
         VgaWriter::lock().write_fmt(args).unwrap();
     })

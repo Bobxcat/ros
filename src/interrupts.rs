@@ -1,6 +1,10 @@
+use pc_keyboard::{DecodedKey, KeyCode, Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
 use spin::{Lazy, Mutex};
-use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
+use x86_64::{
+    instructions::port::{Port, PortReadOnly},
+    structures::idt::{InterruptDescriptorTable, InterruptStackFrame},
+};
 
 use crate::{gdt, vga_print, vga_println};
 
@@ -13,6 +17,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
     }
     idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
+    idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
     idt
 });
 
@@ -36,11 +41,44 @@ extern "x86-interrupt" fn double_fault_handler(
 // External Interrupts
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    vga_print!(".");
+    // vga_print!(".");
 
     unsafe {
         PICS.lock()
             .notify_end_of_interrupt(InterruptIndex::Timer.as_u8())
+    }
+}
+
+extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    static KEYBOARD: Mutex<Keyboard<pc_keyboard::layouts::Us104Key, ScancodeSet1>> =
+        Mutex::new(Keyboard::new(
+            ScancodeSet1::new(),
+            pc_keyboard::layouts::Us104Key,
+            pc_keyboard::HandleControl::Ignore,
+        ));
+
+    let mut keyboard = KEYBOARD.lock();
+    let mut port = PortReadOnly::new(0x60);
+
+    let scancode: u8 = unsafe { port.read() };
+    if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+        if let Some(key) = keyboard.process_keyevent(key_event) {
+            match key {
+                DecodedKey::Unicode(character) => vga_print!("{}", character),
+                DecodedKey::RawKey(key) => {
+                    //
+                    match key {
+                        KeyCode::LShift | KeyCode::RShift => (),
+                        _ => vga_print!("{:?}", key),
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe {
+        PICS.lock()
+            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8())
     }
 }
 
@@ -58,6 +96,7 @@ pub fn init_pics() {
 #[repr(u8)]
 pub enum InterruptIndex {
     Timer = PIC_1_OFFSET,
+    Keyboard = PIC_1_OFFSET + 1,
 }
 
 impl InterruptIndex {
