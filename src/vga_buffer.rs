@@ -1,12 +1,10 @@
 use core::fmt::Write;
-use core::{cell::OnceCell, fmt, ops::DerefMut, ptr::NonNull};
+use core::{fmt, ops::DerefMut};
 
 use spin::{Lazy, Mutex};
 use volatile::Volatile;
 use x86_64::instructions::interrupts;
 use x86_64::instructions::port::Port;
-
-use crate::serial_println;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +96,7 @@ impl VgaWriter {
             w.clear();
             Mutex::new(w)
         });
+
         VGA_WRITER.lock()
     }
     pub fn set_colors(&mut self, foreground: Color, background: Color) {

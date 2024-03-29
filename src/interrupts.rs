@@ -2,7 +2,7 @@ use pc_keyboard::{DecodedKey, KeyCode, Keyboard, ScancodeSet1};
 use pic8259::ChainedPics;
 use spin::{Lazy, Mutex};
 use x86_64::{
-    instructions::port::{Port, PortReadOnly},
+    instructions::port::PortReadOnly,
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame},
 };
 
@@ -100,10 +100,12 @@ pub enum InterruptIndex {
 }
 
 impl InterruptIndex {
+    #[allow(unused)]
     fn as_u8(self) -> u8 {
         self.into()
     }
 
+    #[allow(unused)]
     fn as_usize(self) -> usize {
         self.into()
     }
