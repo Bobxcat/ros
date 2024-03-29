@@ -5,7 +5,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use ros::vga_println;
+use ros::{halt_loop, vga_println};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -16,7 +16,7 @@ pub extern "C" fn _start() -> ! {
     #[cfg(test)]
     test_main();
 
-    loop {}
+    halt_loop();
 }
 
 /// This function is called on panic.
@@ -24,7 +24,8 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     vga_println!("{}", info);
-    loop {}
+
+    halt_loop();
 }
 
 #[cfg(test)]

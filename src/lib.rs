@@ -9,6 +9,7 @@
 
 use core::panic::PanicInfo;
 
+pub mod gdt;
 pub mod interrupts;
 pub mod serial;
 pub mod vga_buffer;
@@ -54,7 +55,7 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
     serial_println!("Error: {}\n", info);
     exit_qemu(QemuExitCode::Failed);
 
-    loop {}
+    halt_loop();
 }
 
 #[cfg(test)]
@@ -64,7 +65,17 @@ fn panic(info: &PanicInfo) -> ! {
 }
 
 pub fn init() {
+    gdt::init();
     interrupts::init_idt();
+    interrupts::init_pics();
+
+    x86_64::instructions::interrupts::enable();
+}
+
+pub fn halt_loop() -> ! {
+    loop {
+        x86_64::instructions::hlt();
+    }
 }
 
 #[cfg(test)]
@@ -72,7 +83,8 @@ pub fn init() {
 pub extern "C" fn _start() -> ! {
     init();
     test_main();
-    loop {}
+
+    halt_loop();
 }
 
 #[cfg(test)]
