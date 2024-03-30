@@ -6,7 +6,7 @@ use x86_64::{
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame},
 };
 
-use crate::{gdt, vga_print, vga_println};
+use crate::{gdt, vga_buffer::VgaWriter, vga_print, vga_println};
 
 static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
@@ -63,15 +63,22 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let scancode: u8 = unsafe { port.read() };
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         if let Some(key) = keyboard.process_keyevent(key_event) {
+            let newline: bool;
             match key {
-                DecodedKey::Unicode(character) => vga_print!("{}", character),
+                DecodedKey::Unicode(character) => {
+                    vga_print!("{}", character);
+                    newline = character == '\n';
+                }
                 DecodedKey::RawKey(key) => {
-                    //
+                    newline = key == KeyCode::Return;
                     match key {
                         KeyCode::LShift | KeyCode::RShift => (),
-                        _ => vga_print!("{:?}", key),
+                        _ => vga_print!("{key:?}"),
                     }
                 }
+            }
+            if newline {
+                vga_print!("Answer: Is Potato\n  > ");
             }
         }
     }
