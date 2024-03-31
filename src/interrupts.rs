@@ -3,10 +3,10 @@ use pic8259::ChainedPics;
 use spin::{Lazy, Mutex};
 use x86_64::{
     instructions::port::PortReadOnly,
-    structures::idt::{InterruptDescriptorTable, InterruptStackFrame},
+    structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
 };
 
-use crate::{gdt, vga_buffer::VgaWriter, vga_print, vga_println};
+use crate::{gdt, halt_loop, vga_buffer::VgaWriter, vga_print, vga_println};
 
 static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
@@ -16,6 +16,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_handler_fn(double_fault_handler)
             .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
     }
+    idt.page_fault.set_handler_fn(page_fault_handler);
     idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
     idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
     idt
@@ -36,6 +37,19 @@ extern "x86-interrupt" fn double_fault_handler(
     _err_code: u64,
 ) -> ! {
     panic!("EXCEPTION: Double Fault\n{stack_frame:#?}");
+}
+
+extern "x86-interrupt" fn page_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: PageFaultErrorCode,
+) {
+    use x86_64::registers::control::Cr2;
+
+    vga_println!("EXCEPTION: PAGE FAULT");
+    vga_println!("Accessed Address: {:?}", Cr2::read());
+    vga_println!("Error Code: {:?}", error_code);
+    vga_println!("{:#?}", stack_frame);
+    halt_loop();
 }
 
 // External Interrupts
@@ -63,22 +77,14 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     let scancode: u8 = unsafe { port.read() };
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         if let Some(key) = keyboard.process_keyevent(key_event) {
-            let newline: bool;
             match key {
                 DecodedKey::Unicode(character) => {
                     vga_print!("{}", character);
-                    newline = character == '\n';
                 }
-                DecodedKey::RawKey(key) => {
-                    newline = key == KeyCode::Return;
-                    match key {
-                        KeyCode::LShift | KeyCode::RShift => (),
-                        _ => vga_print!("{key:?}"),
-                    }
-                }
-            }
-            if newline {
-                vga_print!("Answer: Is Potato\n  > ");
+                DecodedKey::RawKey(key) => match key {
+                    KeyCode::LShift | KeyCode::RShift => (),
+                    _ => vga_print!("{key:?}"),
+                },
             }
         }
     }
